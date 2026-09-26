@@ -6,8 +6,26 @@ import { useRouter } from 'next/navigation';
 import { compressImage, formatBytes } from '@/lib/compressImage';
 import { uploadToR2Direct } from '@/lib/r2Direct';
 
+// ── Smart Gender Mapper for Subcategories ──────────────────────────────────
+function getSubcategoryGender(sub, categorySlug) {
+  if (sub.gender) return sub.gender;
+  const slug = (sub.slug || '').toLowerCase();
+  if (['heels', 'flats', 'wedges', 'dresses', 'lehengas', 'sarees', 'co-ords', 'skirts', 'tops', 'handbags'].includes(slug)) {
+    return 'women';
+  }
+  if (['formal-shoes', 'loafers', 'ties', 'kurta-pajama'].includes(slug)) {
+    return 'men';
+  }
+  if (categorySlug === 'gadgets') {
+    return 'unisex';
+  }
+  return 'both';
+}
+
 function getSizePreset(subcategoryName) {
   const n = (subcategoryName || '').toLowerCase();
+  if (/case|phone|guard|screen|audio|sound|tech|charge|cable/.test(n))
+    return { label: 'Device / Phone Model Compatibility', sizes: ['iPhone 16 Pro Max', 'iPhone 16 Pro', 'iPhone 16', 'iPhone 15 Pro Max', 'iPhone 15', 'Galaxy S25 Ultra', 'Galaxy S24', 'OnePlus 13', 'Universal'] };
   if (/shirt|top|t-shirt|tee|kurta|blouse|polo|sweatshirt|hoodie|jacket|coat|blazer/.test(n))
     return { label: 'Clothing Sizes', sizes: ['XS', 'S', 'M', 'L', 'XL', 'XXL', '3XL'] };
   if (/pant|trouser|jean|chino|short|skirt|legging/.test(n))
@@ -46,8 +64,9 @@ export default function AdminEditProductPage({ params }) {
   const [uploadProgress, setUploadProgress] = useState('');
 
   const [form, setForm] = useState({
-    name: '', brand: 'Brand 2 Brand', description: '', price: '', originalPrice: '',
+    name: '', brand: 'Skplore', description: '', price: '', originalPrice: '',
     categoryId: '', subcategoryId: '', gender: '', badge: '', atmosphereTheme: 'default',
+    minOrderQuantity: 1, maxOrderQuantity: '', stockQuantity: '',
   });
 
   const [sizes, setSizes] = useState([]);
@@ -63,22 +82,132 @@ export default function AdminEditProductPage({ params }) {
     const load = async () => {
       const { data: cats } = await supabase.from('categories').select('*, subcategories(*)').order('name');
       setCategories(cats || []);
+      
       const { data: product } = await supabase.from('products')
-        .select('*, subcategories(id,name,category_id,categories(id,name)), product_images(id,image_url,display_order,color_tag)')
+        .select('*, subcategories(id,name,slug,category_id,categories(id,name,slug)), product_images(id,image_url,display_order,color_tag)')
         .eq('id', productId).single();
+      
       if (!product) { router.push('/products'); return; }
+      
       const catId = product.subcategories?.categories?.id || '';
       const cat = cats?.find(c => c.id === catId);
       setSubcategories(cat?.subcategories || []);
       setSelectedSubName(product.subcategories?.name || '');
       setProductCode(product.product_code || '');
+
+      // Multi-layer dynamic gadget limits fetch:
+      // 1. Direct public storage CDN fetch with cache-busting (bypasses browser cache & proxy)
+      // 2. /api/gadget-limits endpoint
+      // 3. Direct supabase client storage download
+      // 4. Native Postgres columns
+      let minOrderQuantity = 1;
+      let maxOrderQuantity = '';
+      let stockQuantity = '';
+      let limitsLoaded = false;
+
+      // Layer 1: Direct public storage CDN fetch with cache-busting
+      try {
+        const sUrl = `https://skimedlufkytgemmdhsv.supabase.co/storage/v1/object/public/store-config/gadget_quantities.json?t=${Date.now()}`;
+        const sRes = await fetch(sUrl, { cache: 'no-store' });
+        if (sRes.ok) {
+          const sMap = await sRes.json();
+          const pLimit = sMap && (sMap[productId] || sMap[productId.toLowerCase()]);
+          if (pLimit) {
+            if (pLimit.minOrderQuantity !== undefined && pLimit.minOrderQuantity !== null) {
+              minOrderQuantity = pLimit.minOrderQuantity;
+              limitsLoaded = true;
+            }
+            if (pLimit.maxOrderQuantity !== undefined && pLimit.maxOrderQuantity !== null) {
+              maxOrderQuantity = pLimit.maxOrderQuantity;
+              limitsLoaded = true;
+            }
+            if (pLimit.stockQuantity !== undefined && pLimit.stockQuantity !== null) {
+              stockQuantity = pLimit.stockQuantity;
+              limitsLoaded = true;
+            }
+          }
+        }
+      } catch (err) {
+        console.warn('Storage limits fetch note:', err);
+      }
+
+      // Layer 2: API route
+      if (!limitsLoaded) {
+        try {
+          const limitRes = await fetch(`/api/gadget-limits?productId=${productId}&_t=${Date.now()}`, {
+            cache: 'no-store',
+          });
+          if (limitRes.ok) {
+            const lData = await limitRes.json();
+            if (lData.minOrderQuantity !== undefined && lData.minOrderQuantity !== null) {
+              minOrderQuantity = lData.minOrderQuantity;
+              limitsLoaded = true;
+            }
+            if (lData.maxOrderQuantity !== undefined && lData.maxOrderQuantity !== null) {
+              maxOrderQuantity = lData.maxOrderQuantity;
+              limitsLoaded = true;
+            }
+            if (lData.stockQuantity !== undefined && lData.stockQuantity !== null) {
+              stockQuantity = lData.stockQuantity;
+              limitsLoaded = true;
+            }
+          }
+        } catch (err) {
+          console.warn('/api/gadget-limits fetch note:', err);
+        }
+      }
+
+      // Layer 3: Supabase client download
+      if (!limitsLoaded) {
+        try {
+          const { data: qBlob } = await supabase.storage.from('store-config').download('gadget_quantities.json');
+          if (qBlob) {
+            const qMap = JSON.parse(await qBlob.text());
+            const pLimit = qMap && (qMap[productId] || qMap[productId.toLowerCase()]);
+            if (pLimit) {
+              if (pLimit.minOrderQuantity !== undefined && pLimit.minOrderQuantity !== null) {
+                minOrderQuantity = pLimit.minOrderQuantity;
+              }
+              if (pLimit.maxOrderQuantity !== undefined && pLimit.maxOrderQuantity !== null) {
+                maxOrderQuantity = pLimit.maxOrderQuantity;
+              }
+              if (pLimit.stockQuantity !== undefined && pLimit.stockQuantity !== null) {
+                stockQuantity = pLimit.stockQuantity;
+              }
+            }
+          }
+        } catch (err) {}
+      }
+
+      // Layer 4: Native Postgres columns
+      if (product.min_order_quantity !== undefined && product.min_order_quantity !== null) {
+        minOrderQuantity = product.min_order_quantity;
+      }
+      if (product.max_order_quantity !== undefined && product.max_order_quantity !== null) {
+        maxOrderQuantity = product.max_order_quantity;
+      }
+      if (product.stock_quantity !== undefined && product.stock_quantity !== null) {
+        stockQuantity = product.stock_quantity;
+      }
+
+      console.log('✅ Loaded product limits for edit:', { productId, minOrderQuantity, maxOrderQuantity, stockQuantity });
+
       setForm({
-        name: product.name || '', brand: product.brand || 'Brand 2 Brand',
-        description: product.description || '', price: product.price?.toString() || '',
-        originalPrice: product.original_price?.toString() || '', categoryId: catId,
-        subcategoryId: product.subcategory_id || '', gender: product.gender || '',
-        badge: product.badge || '', atmosphereTheme: product.atmosphere_theme || 'default',
+        name: product.name || '',
+        brand: product.brand || 'Skplore',
+        description: product.description || '',
+        price: product.price?.toString() || '',
+        originalPrice: product.original_price?.toString() || '',
+        categoryId: catId,
+        subcategoryId: product.subcategory_id || '',
+        gender: product.gender || '',
+        badge: product.badge || '',
+        atmosphereTheme: product.atmosphere_theme || 'default',
+        minOrderQuantity,
+        maxOrderQuantity,
+        stockQuantity,
       });
+
       setSizes(product.sizes || []);
       setColors(product.colors || []);
       setExistingImages((product.product_images || []).sort((a, b) => a.display_order - b.display_order));
@@ -102,6 +231,18 @@ export default function AdminEditProductPage({ params }) {
     handleChange('subcategoryId', id);
     setSelectedSubName(sub?.name || '');
   };
+
+  const activeCategory = categories.find(c => c.id === form.categoryId);
+  const isGadget = activeCategory?.slug === 'gadgets' || 
+                   activeCategory?.name?.toLowerCase() === 'gadgets' || 
+                   form.atmosphereTheme === 'gadgets';
+
+  const visibleSubcategories = subcategories.filter(sub => {
+    if (isGadget) return true;
+    if (!form.gender || form.gender === 'unisex') return true;
+    const g = getSubcategoryGender(sub, activeCategory?.slug);
+    return g === 'both' || g === form.gender || g === 'unisex';
+  });
 
   const sizePreset = getSizePreset(selectedSubName);
   const toggleSize = (s) => setSizes(prev => prev.includes(s) ? prev.filter(x => x !== s) : [...prev, s]);
@@ -148,7 +289,6 @@ export default function AdminEditProductPage({ params }) {
 
   // Images that will remain after save (existing minus removed)
   const activeExistingCount = existingImages.filter(img => !removedImageIds.includes(img.id)).length;
-  const totalAfterSave = activeExistingCount + newImages.length;
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -156,7 +296,7 @@ export default function AdminEditProductPage({ params }) {
     setSaving(true);
     setUploadProgress('');
     try {
-      // ── Step 1: Update product metadata + delete removed images (lightweight JSON) ──
+      // ── Step 1: Update product metadata + limits + delete removed images ──
       const metaRes = await fetch('/api/edit-product', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -165,14 +305,17 @@ export default function AdminEditProductPage({ params }) {
           name: form.name,
           brand: form.brand,
           subcategoryId: form.subcategoryId,
-          gender: form.gender,
+          gender: isGadget ? 'unisex' : form.gender,
           price: form.price,
           originalPrice: form.originalPrice,
           description: form.description,
           sizes,
           colors,
           badge: form.badge,
-          atmosphereTheme: form.atmosphereTheme,
+          minOrderQuantity: form.minOrderQuantity ? Math.max(1, parseInt(form.minOrderQuantity, 10)) : 1,
+          maxOrderQuantity: form.maxOrderQuantity || null,
+          stockQuantity: form.stockQuantity !== '' ? form.stockQuantity : null,
+          atmosphereTheme: isGadget ? 'gadgets' : form.atmosphereTheme,
           removedImageIds,
         }),
       });
@@ -180,10 +323,10 @@ export default function AdminEditProductPage({ params }) {
       const metaJson = await metaRes.json();
       if (!metaRes.ok) throw new Error(metaJson.error || 'Save failed');
 
-      // ── Step 2: Upload new images directly Browser → Cloudinary ──
+      // ── Step 2: Upload new images directly Browser → Cloudflare R2 ──
       const imageErrors = [];
       if (newImages.length > 0) {
-        const folder = `brand2brand/products/${productId}`;
+        const folder = `products/${productId}`;
         const startOrder = activeExistingCount;
 
         for (let i = 0; i < newImages.length; i++) {
@@ -191,7 +334,7 @@ export default function AdminEditProductPage({ params }) {
           if (!img.file) continue;
           try {
             setUploadProgress(`Uploading image ${i + 1}/${newImages.length}...`);
-            const ext = img.file.name.split('.').pop();
+            const ext = img.file.name.split('.').pop() || 'webp';
             const result = await uploadToR2Direct(img.file, folder, `${Date.now()}_${i}.${ext}`);
 
             await fetch('/api/save-image', {
@@ -210,12 +353,12 @@ export default function AdminEditProductPage({ params }) {
         }
       }
 
-      // Show results
       if (imageErrors.length > 0) {
         alert(`Product saved, but ${imageErrors.length} image(s) failed to upload:\n\n${imageErrors.join('\n')}\n\nTry again from the Edit page.`);
       }
 
       router.push('/products');
+      router.refresh();
     } catch (err) {
       alert('Error: ' + err.message);
     } finally {
@@ -232,17 +375,15 @@ export default function AdminEditProductPage({ params }) {
         <div>
           <h2>Edit Product</h2>
           <p className="admin-page-subtitle">
-            {form.name}
-            {productCode && (
-              <span style={{ fontFamily: 'monospace', fontSize: '12px', background: 'var(--admin-border)', padding: '2px 8px', borderRadius: '4px', marginLeft: '10px', letterSpacing: '0.05em', color: 'var(--admin-text-muted)' }}>{productCode}</span>
-            )}
+            {form.name ? `Editing "${form.name}"` : 'Update product details'}
+            {productCode && <span className="admin-code-badge">#{productCode}</span>}
           </p>
         </div>
         <button className="admin-btn admin-btn-ghost" onClick={() => router.back()}>← Back</button>
       </div>
 
       <form onSubmit={handleSubmit} className="admin-new-product-form">
-
+        {/* ── SECTION 1: Product Info ── */}
         <div className="admin-form-section">
           <div className="admin-form-section-title"><span className="admin-form-section-num">1</span> Product Info</div>
           <div className="admin-form-section-body">
@@ -258,10 +399,16 @@ export default function AdminEditProductPage({ params }) {
               </div>
               <div className="admin-form-group">
                 <label className="admin-form-label">Gender</label>
-                <select className="admin-form-select" value={form.gender} onChange={e => handleChange('gender', e.target.value)}>
-                  <option value="">Unisex / None</option>
-                  <option value="men">Men</option>
-                  <option value="women">Women</option>
+                <select className="admin-form-select" value={isGadget ? 'unisex' : form.gender} onChange={e => handleChange('gender', e.target.value)} disabled={isGadget}>
+                  {isGadget ? (
+                    <option value="unisex">Unisex (Gadgets)</option>
+                  ) : (
+                    <>
+                      <option value="">Unisex / None</option>
+                      <option value="men">Men</option>
+                      <option value="women">Women</option>
+                    </>
+                  )}
                 </select>
               </div>
               <div className="admin-form-group">
@@ -292,6 +439,7 @@ export default function AdminEditProductPage({ params }) {
           </div>
         </div>
 
+        {/* ── SECTION 2: Category ── */}
         <div className="admin-form-section">
           <div className="admin-form-section-title"><span className="admin-form-section-num">2</span> Category</div>
           <div className="admin-form-section-body">
@@ -307,14 +455,14 @@ export default function AdminEditProductPage({ params }) {
                 <label className="admin-form-label">Subcategory *</label>
                 <select className="admin-form-select" value={form.subcategoryId} onChange={handleSubChange} required disabled={!form.categoryId}>
                   <option value="">Select...</option>
-                  {subcategories.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                  {visibleSubcategories.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
                 </select>
               </div>
             </div>
             <div className="admin-form-group">
               <label className="admin-form-label">Atmosphere Theme</label>
               <div className="admin-chip-row">
-                {['default', 'clothing', 'footwear', 'accessories'].map(t => (
+                {['default', 'clothing', 'footwear', 'accessories', 'gadgets'].map(t => (
                   <button key={t} type="button" className={`admin-chip ${form.atmosphereTheme === t ? 'selected' : ''}`}
                     onClick={() => handleChange('atmosphereTheme', t)}>
                     {t.charAt(0).toUpperCase() + t.slice(1)}
@@ -325,6 +473,121 @@ export default function AdminEditProductPage({ params }) {
           </div>
         </div>
 
+        {/* ── SECTION: Order Quantity & Stock Limits (Dynamic Gadget Controls) ── */}
+        <div className="admin-form-section" style={{
+          borderLeft: isGadget ? '4px solid #6366f1' : '1px solid var(--admin-border)',
+          background: isGadget ? 'linear-gradient(180deg, rgba(99,102,241,0.04) 0%, rgba(255,255,255,0) 100%)' : '#f8fafc',
+          borderRadius: '8px',
+          padding: '20px',
+          marginBottom: '24px',
+        }}>
+          <div className="admin-form-section-title" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <div>
+              <span className="admin-form-section-num" style={{ background: isGadget ? '#6366f1' : '#64748b', color: '#fff' }}>
+                ⚡
+              </span>
+              <strong>Gadget Order Quantity &amp; Stock Limits</strong>
+              {isGadget && <span className="admin-form-section-hint" style={{ color: '#6366f1', fontWeight: 700, marginLeft: '8px' }}>— Active for Gadgets</span>}
+            </div>
+          </div>
+          <div className="admin-form-section-body" style={{ marginTop: '14px' }}>
+            <p className="admin-hint-text" style={{ marginBottom: '16px', color: '#475569' }}>
+              Set dynamic ordering rules. Customers will not be allowed to select or place an order below the minimum or above the upper limit / total available stock.
+            </p>
+
+            <div className="admin-form-row" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '16px' }}>
+              <div className="admin-form-group">
+                <label className="admin-form-label" style={{ fontWeight: 600 }}>
+                  Minimum Order Quantity *
+                  <span style={{ fontSize: '11px', color: '#6366f1', marginLeft: '6px' }}>
+                    (Default starts here)
+                  </span>
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  className="admin-form-input"
+                  value={form.minOrderQuantity !== undefined && form.minOrderQuantity !== '' ? form.minOrderQuantity : 1}
+                  onChange={e => handleChange('minOrderQuantity', Math.max(1, parseInt(e.target.value, 10) || 1))}
+                  placeholder="e.g. 3"
+                  required
+                />
+                <span className="admin-field-hint" style={{ fontSize: '11px', color: 'var(--admin-text-muted)', marginTop: '4px' }}>
+                  Customer cannot order less than this amount.
+                </span>
+              </div>
+
+              <div className="admin-form-group">
+                <label className="admin-form-label" style={{ fontWeight: 600 }}>
+                  Upper Limit / Max Order
+                  <span style={{ fontSize: '11px', color: 'var(--admin-text-muted)', marginLeft: '6px' }}>
+                    (Optional)
+                  </span>
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  className="admin-form-input"
+                  value={form.maxOrderQuantity !== undefined && form.maxOrderQuantity !== null ? form.maxOrderQuantity : ''}
+                  onChange={e => handleChange('maxOrderQuantity', e.target.value ? Math.max(1, parseInt(e.target.value, 10) || 1) : '')}
+                  placeholder="e.g. 10 (Leave blank for no max limit)"
+                />
+                <span className="admin-field-hint" style={{ fontSize: '11px', color: 'var(--admin-text-muted)', marginTop: '4px' }}>
+                  Maximum units customer can buy in a single order.
+                </span>
+              </div>
+
+              <div className="admin-form-group">
+                <label className="admin-form-label" style={{ fontWeight: 600 }}>
+                  Total Available Quantity / Stock
+                  <span style={{ fontSize: '11px', color: 'var(--admin-text-muted)', marginLeft: '6px' }}>
+                    (Optional)
+                  </span>
+                </label>
+                <input
+                  type="number"
+                  min="0"
+                  className="admin-form-input"
+                  value={form.stockQuantity !== undefined && form.stockQuantity !== null ? form.stockQuantity : ''}
+                  onChange={e => handleChange('stockQuantity', e.target.value !== '' ? Math.max(0, parseInt(e.target.value, 10) || 0) : '')}
+                  placeholder="e.g. 50 (Total units available)"
+                />
+                <span className="admin-field-hint" style={{ fontSize: '11px', color: 'var(--admin-text-muted)', marginTop: '4px' }}>
+                  Total units currently available in store.
+                </span>
+              </div>
+            </div>
+
+            {/* Live Interactive Range Preview */}
+            <div style={{
+              marginTop: '16px',
+              padding: '12px 16px',
+              borderRadius: '6px',
+              background: '#ffffff',
+              border: '1px solid #cbd5e1',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              flexWrap: 'wrap',
+              gap: '10px',
+            }}>
+              <div style={{ fontSize: '13px', color: '#1e293b' }}>
+                🛒 <strong>Live Order Range Preview:</strong> Customers can order between{' '}
+                <strong style={{ color: '#dc2626' }}>{form.minOrderQuantity || 1} units</strong> and{' '}
+                <strong style={{ color: '#2563eb' }}>
+                  {form.maxOrderQuantity && form.stockQuantity
+                    ? `${Math.min(form.maxOrderQuantity, form.stockQuantity)} units`
+                    : (form.maxOrderQuantity ? `${form.maxOrderQuantity} units` : (form.stockQuantity ? `${form.stockQuantity} units` : 'No upper limit'))}
+                </strong>.
+              </div>
+              <span style={{ fontSize: '11px', color: '#64748b' }}>
+                Default selector on website will open at: <strong>{form.minOrderQuantity || 1}</strong>
+              </span>
+            </div>
+          </div>
+        </div>
+
+        {/* ── SECTION 3: Sizes ── */}
         <div className="admin-form-section">
           <div className="admin-form-section-title"><span className="admin-form-section-num">3</span> Sizes
             {selectedSubName && <span className="admin-form-section-hint">— {sizePreset.label}</span>}
@@ -354,6 +617,7 @@ export default function AdminEditProductPage({ params }) {
           </div>
         </div>
 
+        {/* ── SECTION 4: Colours ── */}
         <div className="admin-form-section">
           <div className="admin-form-section-title"><span className="admin-form-section-num">4</span> Colours</div>
           <div className="admin-form-section-body">
@@ -363,11 +627,11 @@ export default function AdminEditProductPage({ params }) {
                   className={`admin-color-swatch ${colors.includes(c.name) ? 'selected' : ''}`}
                   style={{ '--swatch-color': c.hex }} onClick={() => toggleColor(c.name)} title={c.name}>
                   {colors.includes(c.name) && <span className="admin-swatch-check">✓</span>}
-                  <span className="admin-swatch-label">{c.name}</span>
+                  <span className="admin-color-tooltip">{c.name}</span>
                 </button>
               ))}
             </div>
-            <div className="admin-custom-add-row">
+            <div className="admin-custom-add-row" style={{ marginTop: '14px' }}>
               <input className="admin-form-input" value={customColorInput}
                 onChange={e => setCustomColorInput(e.target.value)}
                 onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addCustomColor(); } }}
@@ -383,40 +647,32 @@ export default function AdminEditProductPage({ params }) {
           </div>
         </div>
 
+        {/* ── SECTION 5: Images ── */}
         <div className="admin-form-section">
-          <div className="admin-form-section-title">
-            <span className="admin-form-section-num">5</span> Images
-            <span className="admin-form-section-hint">
-              — {totalAfterSave} image{totalAfterSave !== 1 ? 's' : ''} after save
-              {removedImageIds.length > 0 && <span style={{ color: 'var(--admin-danger, #ef4444)' }}> • {removedImageIds.length} marked for removal</span>}
-              {newImages.length > 0 && <span style={{ color: 'var(--admin-success, #22c55e)' }}> • {newImages.length} new</span>}
-            </span>
-          </div>
+          <div className="admin-form-section-title"><span className="admin-form-section-num">5</span> Product Images</div>
           <div className="admin-form-section-body">
-            {/* ── Existing Images ── */}
+            {/* Existing Images */}
             {existingImages.length > 0 && (
-              <div style={{ marginBottom: 16 }}>
-                <p className="admin-form-label" style={{ marginBottom: 10 }}>Current Images ({activeExistingCount} active{removedImageIds.length > 0 ? `, ${removedImageIds.length} pending removal` : ''})</p>
+              <div style={{ marginBottom: 20 }}>
+                <p className="admin-form-label" style={{ marginBottom: 10 }}>
+                  Current Images ({existingImages.length - removedImageIds.length} active
+                  {removedImageIds.length > 0 && `, ${removedImageIds.length} marked for deletion`})
+                </p>
                 <div className="admin-variant-images-area">
                   {existingImages.map((img, i) => {
                     const isMarkedForRemoval = removedImageIds.includes(img.id);
                     return (
-                      <div key={img.id} className="admin-image-preview-single" style={isMarkedForRemoval ? { opacity: 0.35, filter: 'grayscale(1)', position: 'relative' } : {}}>
+                      <div key={img.id} className={`admin-image-preview-single ${isMarkedForRemoval ? 'marked-delete' : ''}`}
+                        style={isMarkedForRemoval ? { opacity: 0.4, filter: 'grayscale(1)' } : {}}>
                         <img src={img.image_url} alt={`Image ${i + 1}`} />
                         {isMarkedForRemoval ? (
-                          <>
-                            <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.5)', borderRadius: 8, flexDirection: 'column', gap: 6, zIndex: 2 }}>
-                              <span style={{ color: '#fff', fontSize: 11, fontWeight: 600 }}>Will be deleted</span>
-                              <button type="button" onClick={() => handleUndoRemove(img.id)}
-                                style={{ background: 'var(--admin-primary, #6366f1)', color: '#fff', border: 'none', borderRadius: 6, padding: '4px 12px', fontSize: 11, cursor: 'pointer', fontWeight: 600 }}>
-                                ↩ Undo
-                              </button>
-                            </div>
-                          </>
+                          <button className="admin-image-undo-btn" type="button" onClick={() => handleUndoRemove(img.id)} title="Undo delete">
+                            ↩
+                          </button>
                         ) : (
-                          <button className="admin-image-remove-btn" type="button"
-                            onClick={() => handleRemoveExisting(img.id)}
-                            title="Mark for removal">×</button>
+                          <button className="admin-image-remove-btn" type="button" onClick={() => handleRemoveExisting(img.id)} title="Mark for removal">
+                            ×
+                          </button>
                         )}
                         <div className="admin-image-badge" style={isMarkedForRemoval ? { background: 'var(--admin-danger, #ef4444)' } : {}}>
                           {isMarkedForRemoval ? '🗑' : i === 0 ? 'Cover' : i + 1}

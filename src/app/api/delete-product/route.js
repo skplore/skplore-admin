@@ -31,6 +31,9 @@ export async function DELETE(request) {
           if (isCloudinaryUrl(img.image_url)) {
             const publicId = extractPublicId(img.image_url);
             if (publicId) await deleteFromCloudinary(publicId);
+          } else if (isR2Url(img.image_url)) {
+            const key = extractR2Key(img.image_url);
+            if (key) await deleteFromR2(key);
           } else if (isSupabaseStorageUrl(img.image_url)) {
             const storagePath = extractSupabaseStoragePath(img.image_url);
             if (storagePath) {

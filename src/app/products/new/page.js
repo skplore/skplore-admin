@@ -6,15 +6,35 @@ import { useRouter } from 'next/navigation';
 import { compressImage, formatBytes } from '@/lib/compressImage';
 import { uploadToR2Direct } from '@/lib/r2Direct';
 
+// ── Smart Gender Mapper for Subcategories ──────────────────────────────────
+function getSubcategoryGender(sub, categorySlug) {
+  if (sub.gender) return sub.gender;
+  const slug = (sub.slug || '').toLowerCase();
+  if (['heels', 'flats', 'wedges', 'dresses', 'lehengas', 'sarees', 'co-ords', 'skirts', 'tops', 'handbags'].includes(slug)) {
+    return 'women';
+  }
+  if (['formal-shoes', 'loafers', 'ties', 'kurta-pajama'].includes(slug)) {
+    return 'men';
+  }
+  if (categorySlug === 'gadgets') {
+    return 'unisex';
+  }
+  return 'both';
+}
+
 // ── Size presets by subcategory keyword ─────────────────────────────────────
 function getSizePreset(subcategoryName) {
   const n = (subcategoryName || '').toLowerCase();
-  if (/shirt|top|t-shirt|tee|kurta|blouse|polo|sweatshirt|hoodie|jacket|coat|blazer/.test(n))
+  if (/heel|flat|wedge/.test(n))
+    return { label: 'Women Shoe Sizes (UK)', sizes: ['3', '4', '5', '6', '7', '8', '9'] };
+  if (/shoe|sneaker|boot|sandal|slipper|footwear|loafer/.test(n))
+    return { label: 'Shoe Sizes (UK)', sizes: ['6', '7', '8', '9', '10', '11', '12'] };
+  if (/case|phone|guard|screen|audio|sound|tech|charge|cable/.test(n))
+    return { label: 'Device / Phone Model Compatibility', sizes: ['iPhone 16 Pro Max', 'iPhone 16 Pro', 'iPhone 16', 'iPhone 15 Pro Max', 'iPhone 15', 'Galaxy S25 Ultra', 'Galaxy S24', 'OnePlus 13', 'Universal'] };
+  if (/shirt|top|t-shirt|tee|kurta|blouse|polo|sweatshirt|hoodie|jacket|coat|blazer|dress|lehenga|saree|co-ord/.test(n))
     return { label: 'Clothing Sizes', sizes: ['XS', 'S', 'M', 'L', 'XL', 'XXL', '3XL'] };
   if (/pant|trouser|jean|chino|short|skirt|legging/.test(n))
     return { label: 'Bottom Sizes (waist)', sizes: ['26', '28', '30', '32', '34', '36', '38', '40', '42'] };
-  if (/shoe|sneaker|boot|sandal|slipper|footwear|loafer|heel/.test(n))
-    return { label: 'Shoe Sizes (UK)', sizes: ['5', '6', '7', '8', '9', '10', '11', '12'] };
   if (/bag|wallet|belt|watch|jewel|accessory|accessories|cap|hat|sock/.test(n))
     return { label: 'Sizes', sizes: ['Free Size', 'One Size'] };
   return { label: 'Sizes', sizes: ['XS', 'S', 'M', 'L', 'XL', 'XXL', '3XL'] };
@@ -53,9 +73,9 @@ export default function AdminNewProductPage() {
   const [uploadProgress, setUploadProgress] = useState('');
 
   const [form, setForm] = useState({
-    name: '', brand: 'Brand 2 Brand', description: '', price: '',
+    name: '', brand: 'Skplore', description: '', price: '',
     originalPrice: '', categoryId: '', subcategoryId: '',
-    gender: '', badge: '', atmosphereTheme: 'default',
+    gender: 'men', badge: '', atmosphereTheme: 'default', minOrderQuantity: 1, maxOrderQuantity: '', stockQuantity: '',
   });
 
   const [sizes, setSizes] = useState([]);
@@ -71,14 +91,35 @@ export default function AdminNewProductPage() {
       .then(({ data }) => setCategories(data || []));
   }, []);
 
-  useEffect(() => {
-    if (form.categoryId) {
-      const cat = categories.find(c => c.id === form.categoryId);
-      setSubcategories(cat?.subcategories || []);
-      setForm(prev => ({ ...prev, subcategoryId: '' }));
-      setSelectedSubName('');
-    }
-  }, [form.categoryId, categories]);
+  const activeCategory = categories.find(c => c.id === form.categoryId);
+  const isGadget = activeCategory?.slug === 'gadgets';
+
+  const handleCategoryChange = (e) => {
+    const catId = e.target.value;
+    const cat = categories.find(c => c.id === catId);
+    const gadget = cat?.slug === 'gadgets';
+
+    setForm(prev => ({
+      ...prev,
+      categoryId: catId,
+      subcategoryId: '',
+      gender: gadget ? 'unisex' : (prev.gender === 'unisex' ? 'men' : prev.gender || 'men'),
+      atmosphereTheme: gadget ? 'gadgets' : cat?.slug || 'default',
+    }));
+    setSubcategories(cat?.subcategories || []);
+    setSelectedSubName('');
+    setSizes([]);
+  };
+
+  const handleGenderChange = (newGender) => {
+    setForm(prev => ({
+      ...prev,
+      gender: newGender,
+      subcategoryId: '', // reset subcategory on gender switch to avoid mismatch
+    }));
+    setSelectedSubName('');
+    setSizes([]);
+  };
 
   const handleChange = (field, value) => setForm(prev => ({ ...prev, [field]: value }));
 
@@ -87,8 +128,16 @@ export default function AdminNewProductPage() {
     const sub = subcategories.find(s => s.id === id);
     handleChange('subcategoryId', id);
     setSelectedSubName(sub?.name || '');
-    setSizes([]); // reset sizes when subcategory changes
+    setSizes([]);
   };
+
+  // Filter subcategories smartly according to selected gender
+  const visibleSubcategories = subcategories.filter(sub => {
+    if (isGadget) return true;
+    if (!form.gender || form.gender === 'unisex') return true;
+    const g = getSubcategoryGender(sub, activeCategory?.slug);
+    return g === 'both' || g === form.gender || g === 'unisex';
+  });
 
   const sizePreset = getSizePreset(selectedSubName);
 
@@ -147,108 +196,72 @@ export default function AdminNewProductPage() {
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!form.name || !form.price || !form.subcategoryId) {
-      alert('Please fill: name, price, and subcategory.');
+      alert('Please fill: name, price, category, and subcategory.');
       return;
     }
     setLoading(true);
     setUploadProgress('');
     try {
-      // ── Step 1: Create the product row first (no images, lightweight JSON) ──
       const productRes = await fetch('/api/upload-product', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           name: form.name,
-          brand: form.brand,
+          brand: form.brand || 'Skplore',
           subcategoryId: form.subcategoryId,
-          gender: form.gender,
+          gender: isGadget ? 'unisex' : form.gender,
           price: form.price,
           originalPrice: form.originalPrice,
           description: form.description,
           sizes,
           colors,
-          badge: form.badge,
+          badge: form.badge || null,
           atmosphereTheme: form.atmosphereTheme,
+          minOrderQuantity: form.minOrderQuantity || 1,
+          maxOrderQuantity: form.maxOrderQuantity || null,
+          stockQuantity: form.stockQuantity !== '' ? form.stockQuantity : null,
         }),
       });
 
-      const productJson = await productRes.json();
-      if (!productRes.ok) throw new Error(productJson.error || 'Failed to create product');
+      if (!productRes.ok) {
+        const err = await productRes.json();
+        throw new Error(err.error || 'Failed to create product row');
+      }
 
-      const productId = productJson.productId;
-      const folder = `brand2brand/products/${productId}`;
-      const imageResults = { uploaded: 0, failed: 0, errors: [] };
+      const { productId } = await productRes.json();
 
-      // ── Step 2: Upload images directly Browser → Cloudinary ──
-      const totalImages = (coverImage ? 1 : 0) + variantImages.length;
-      let completedImages = 0;
+      let order = 0;
+      const folder = `products/${productId}`;
 
-      // Upload cover image
       if (coverImage?.file) {
-        try {
-          setUploadProgress(`Uploading cover image (1/${totalImages})...`);
-          const ext = coverImage.file.name.split('.').pop();
-          const result = await uploadToR2Direct(coverImage.file, folder, `cover.${ext}`);
-
-          // Save image URL to database
-          await fetch('/api/save-image', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              productId,
-              imageUrl: result.url,
-              displayOrder: 0,
-              colorTag: null,
-            }),
-          });
-
-          imageResults.uploaded++;
-          completedImages++;
-        } catch (err) {
-          imageResults.failed++;
-          imageResults.errors.push(`Cover upload: ${err.message}`);
-          completedImages++;
-        }
+        setUploadProgress('Uploading cover image to Cloudflare R2...');
+        const ext = coverImage.file.name.split('.').pop() || 'webp';
+        const coverResult = await uploadToR2Direct(coverImage.file, folder, `cover_${Date.now()}.${ext}`);
+        await fetch('/api/save-image', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ productId, imageUrl: coverResult.url, displayOrder: order++, colorTag: null }),
+        });
       }
 
-      // Upload variant images
-      const variantColorTags = variantImages.map(v => v.colorTag);
       for (let i = 0; i < variantImages.length; i++) {
-        const img = variantImages[i];
-        if (!img.file) continue;
-        try {
-          setUploadProgress(`Uploading image ${completedImages + 1}/${totalImages}...`);
-          const ext = img.file.name.split('.').pop();
-          const result = await uploadToR2Direct(img.file, folder, `variant_${i + 1}.${ext}`);
-
-          await fetch('/api/save-image', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              productId,
-              imageUrl: result.url,
-              displayOrder: i + 1,
-              colorTag: variantColorTags[i] || null,
-            }),
-          });
-
-          imageResults.uploaded++;
-          completedImages++;
-        } catch (err) {
-          imageResults.failed++;
-          imageResults.errors.push(`Variant ${i + 1}: ${err.message}`);
-          completedImages++;
-        }
+        const v = variantImages[i];
+        if (!v.file) continue;
+        setUploadProgress(`Uploading gallery image ${i + 1} of ${variantImages.length}...`);
+        const ext = v.file.name.split('.').pop() || 'webp';
+        const variantResult = await uploadToR2Direct(v.file, folder, `variant_${Date.now()}_${i + 1}.${ext}`);
+        await fetch('/api/save-image', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ productId, imageUrl: variantResult.url, displayOrder: order++, colorTag: v.colorTag || null }),
+        });
       }
 
-      // Show results
-      if (imageResults.failed > 0) {
-        alert(`Product created, but ${imageResults.failed} image(s) failed to upload:\n\n${imageResults.errors.join('\n')}\n\nYou can re-upload images from the Edit page.`);
-      }
-
+      setUploadProgress('Complete! Redirecting...');
       router.push('/products');
+      router.refresh();
     } catch (err) {
-      alert('Error: ' + err.message);
+      alert(err.message);
     } finally {
       setLoading(false);
       setUploadProgress('');
@@ -256,43 +269,35 @@ export default function AdminNewProductPage() {
   };
 
   return (
-    <>
-      <div className="admin-page-header">
+    <div>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '24px' }}>
         <div>
-          <h2>Add New Product</h2>
-          <p className="admin-page-subtitle">Fill in details below — takes about 30 seconds</p>
+          <h2 style={{ fontSize: '20px', fontWeight: 700, margin: 0 }}>Add New Product</h2>
+          <p className="admin-page-subtitle">Product will immediately appear in the selected world and gender section.</p>
         </div>
-        <button className="admin-btn admin-btn-ghost" onClick={() => router.back()}>← Back</button>
+        <button type="button" className="admin-btn admin-btn-ghost" onClick={() => router.back()}>
+          Back
+        </button>
       </div>
 
       <form onSubmit={handleSubmit} className="admin-new-product-form">
-
-        {/* ── SECTION 1: Core Info ── */}
+        {/* ── SECTION 1: Basic Info ── */}
         <div className="admin-form-section">
           <div className="admin-form-section-title">
-            <span className="admin-form-section-num">1</span> Product Info
+            <span className="admin-form-section-num">1</span> Basic Information
           </div>
           <div className="admin-form-section-body">
             <div className="admin-form-group">
               <label className="admin-form-label">Product Name *</label>
               <input className="admin-form-input admin-form-input-lg" value={form.name}
                 onChange={e => handleChange('name', e.target.value)}
-                placeholder="e.g. Premium Oxford Shirt" required id="product-name" />
+                placeholder="e.g. Slim Fit Linen Shirt, High Heels, Wireless Earbuds..." required />
             </div>
-            <div className="admin-form-row-3">
+            <div className="admin-form-row">
               <div className="admin-form-group">
                 <label className="admin-form-label">Brand</label>
                 <input className="admin-form-input" value={form.brand}
                   onChange={e => handleChange('brand', e.target.value)} />
-              </div>
-              <div className="admin-form-group">
-                <label className="admin-form-label">Gender</label>
-                <select className="admin-form-select" value={form.gender}
-                  onChange={e => handleChange('gender', e.target.value)}>
-                  <option value="">Unisex / None</option>
-                  <option value="men">Men</option>
-                  <option value="women">Women</option>
-                </select>
               </div>
               <div className="admin-form-group">
                 <label className="admin-form-label">Badge</label>
@@ -322,39 +327,72 @@ export default function AdminNewProductPage() {
               <label className="admin-form-label">Description <span className="admin-form-label-hint">optional</span></label>
               <textarea className="admin-form-textarea" value={form.description}
                 onChange={e => handleChange('description', e.target.value)}
-                placeholder="Describe the product..." />
+                placeholder="Describe the product material, design, fit, and highlights..." />
             </div>
           </div>
         </div>
 
-        {/* ── SECTION 2: Category ── */}
+        {/* ── SECTION 2: Category & Placement ── */}
         <div className="admin-form-section">
           <div className="admin-form-section-title">
-            <span className="admin-form-section-num">2</span> Category
+            <span className="admin-form-section-num">2</span> Category & Placement
           </div>
           <div className="admin-form-section-body">
-            <div className="admin-form-row">
+            <div className="admin-form-row-3">
               <div className="admin-form-group">
-                <label className="admin-form-label">Category *</label>
+                <label className="admin-form-label">Department / Category *</label>
                 <select className="admin-form-select" value={form.categoryId}
-                  onChange={e => handleChange('categoryId', e.target.value)} required>
+                  onChange={handleCategoryChange} required>
                   <option value="">Select category...</option>
                   {categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
                 </select>
               </div>
+
+              <div className="admin-form-group">
+                <label className="admin-form-label">Target Gender *</label>
+                <select
+                  className="admin-form-select"
+                  value={form.gender}
+                  onChange={e => handleGenderChange(e.target.value)}
+                  disabled={isGadget}
+                  required
+                >
+                  {isGadget ? (
+                    <option value="unisex">Unisex (Gadgets)</option>
+                  ) : (
+                    <>
+                      <option value="men">Men</option>
+                      <option value="women">Women</option>
+                      <option value="unisex">Unisex / Both</option>
+                    </>
+                  )}
+                </select>
+              </div>
+
               <div className="admin-form-group">
                 <label className="admin-form-label">Subcategory *</label>
                 <select className="admin-form-select" value={form.subcategoryId}
                   onChange={handleSubcategoryChange} required disabled={!form.categoryId}>
-                  <option value="">Select subcategory...</option>
-                  {subcategories.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                  <option value="">
+                    {!form.categoryId ? 'Select category first...' : 'Select subcategory...'}
+                  </option>
+                  {visibleSubcategories.map(s => {
+                    const g = getSubcategoryGender(s, activeCategory?.slug);
+                    const tag = !isGadget && g !== 'both' ? ` (${g.toUpperCase()})` : '';
+                    return (
+                      <option key={s.id} value={s.id}>
+                        {s.name}{tag}
+                      </option>
+                    );
+                  })}
                 </select>
               </div>
             </div>
+
             <div className="admin-form-group">
               <label className="admin-form-label">Atmosphere Theme</label>
               <div className="admin-chip-row">
-                {['default', 'clothing', 'footwear', 'accessories'].map(t => (
+                {['default', 'clothing', 'footwear', 'accessories', 'gadgets'].map(t => (
                   <button key={t} type="button"
                     className={`admin-chip ${form.atmosphereTheme === t ? 'selected' : ''}`}
                     onClick={() => handleChange('atmosphereTheme', t)}>
@@ -366,15 +404,125 @@ export default function AdminNewProductPage() {
           </div>
         </div>
 
+
+        {/* ── SECTION: Order Quantity & Stock Limits ── */}
+        <div className="admin-form-section" style={{
+          borderLeft: isGadget ? '4px solid #6366f1' : '1px solid var(--admin-border)',
+          background: isGadget ? 'linear-gradient(180deg, rgba(99,102,241,0.03) 0%, rgba(255,255,255,0) 100%)' : 'transparent',
+        }}>
+          <div className="admin-form-section-title">
+            <span className="admin-form-section-num" style={{ background: isGadget ? '#6366f1' : undefined, color: isGadget ? '#fff' : undefined }}>
+              ⚡
+            </span>
+            Gadget Order Quantity &amp; Stock Limits
+            {isGadget && <span className="admin-form-section-hint" style={{ color: '#6366f1', fontWeight: 600 }}>— Active for Gadgets</span>}
+          </div>
+          <div className="admin-form-section-body">
+            <p className="admin-hint-text" style={{ marginBottom: '16px' }}>
+              Set dynamic ordering rules. Customers will not be allowed to select or place an order below the minimum or above the upper limit / total available stock.
+            </p>
+
+            <div className="admin-form-row" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '16px' }}>
+              <div className="admin-form-group">
+                <label className="admin-form-label">
+                  Minimum Order Quantity *
+                  <span style={{ fontSize: '11px', color: '#6366f1', marginLeft: '6px' }}>
+                    (Default starts here)
+                  </span>
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  className="admin-form-input"
+                  value={form.minOrderQuantity || 1}
+                  onChange={e => handleChange('minOrderQuantity', Math.max(1, parseInt(e.target.value, 10) || 1))}
+                  placeholder="e.g. 3"
+                  required
+                />
+                <span className="admin-field-hint" style={{ fontSize: '11px', color: 'var(--admin-text-muted)', marginTop: '4px' }}>
+                  Customer cannot order less than this amount.
+                </span>
+              </div>
+
+              <div className="admin-form-group">
+                <label className="admin-form-label">
+                  Upper Limit / Max Order
+                  <span style={{ fontSize: '11px', color: 'var(--admin-text-muted)', marginLeft: '6px' }}>
+                    (Optional)
+                  </span>
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  className="admin-form-input"
+                  value={form.maxOrderQuantity || ''}
+                  onChange={e => handleChange('maxOrderQuantity', e.target.value ? Math.max(1, parseInt(e.target.value, 10) || 1) : '')}
+                  placeholder="e.g. 10 (Leave blank for no max limit)"
+                />
+                <span className="admin-field-hint" style={{ fontSize: '11px', color: 'var(--admin-text-muted)', marginTop: '4px' }}>
+                  Maximum units customer can buy in a single order.
+                </span>
+              </div>
+
+              <div className="admin-form-group">
+                <label className="admin-form-label">
+                  Total Available Quantity / Stock
+                  <span style={{ fontSize: '11px', color: 'var(--admin-text-muted)', marginLeft: '6px' }}>
+                    (Optional)
+                  </span>
+                </label>
+                <input
+                  type="number"
+                  min="0"
+                  className="admin-form-input"
+                  value={form.stockQuantity !== undefined ? form.stockQuantity : ''}
+                  onChange={e => handleChange('stockQuantity', e.target.value !== '' ? Math.max(0, parseInt(e.target.value, 10) || 0) : '')}
+                  placeholder="e.g. 50 (Total units available)"
+                />
+                <span className="admin-field-hint" style={{ fontSize: '11px', color: 'var(--admin-text-muted)', marginTop: '4px' }}>
+                  Total units currently available in store.
+                </span>
+              </div>
+            </div>
+
+            {/* Live Interactive Range Preview */}
+            <div style={{
+              marginTop: '16px',
+              padding: '12px 16px',
+              borderRadius: '6px',
+              background: '#f1f5f9',
+              border: '1px solid #e2e8f0',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              flexWrap: 'wrap',
+              gap: '10px',
+            }}>
+              <div style={{ fontSize: '13px', color: '#1e293b' }}>
+                🛒 <strong>Live Order Range Preview:</strong> Customers can order between{' '}
+                <strong style={{ color: '#dc2626' }}>{form.minOrderQuantity || 1} units</strong> and{' '}
+                <strong style={{ color: '#2563eb' }}>
+                  {form.maxOrderQuantity && form.stockQuantity
+                    ? `${Math.min(form.maxOrderQuantity, form.stockQuantity)} units`
+                    : (form.maxOrderQuantity ? `${form.maxOrderQuantity} units` : (form.stockQuantity ? `${form.stockQuantity} units` : 'No upper limit'))}
+                </strong>.
+              </div>
+              <span style={{ fontSize: '11px', color: '#64748b' }}>
+                Default selector on website will open at: <strong>{form.minOrderQuantity || 1}</strong>
+              </span>
+            </div>
+          </div>
+        </div>
+
         {/* ── SECTION 3: Sizes ── */}
         <div className="admin-form-section">
           <div className="admin-form-section-title">
-            <span className="admin-form-section-num">3</span> Sizes
+            <span className="admin-form-section-num">3</span> Sizes & Compatibility
             {selectedSubName && <span className="admin-form-section-hint">— {sizePreset.label} for {selectedSubName}</span>}
           </div>
           <div className="admin-form-section-body">
             {!form.subcategoryId && (
-              <p className="admin-hint-text">👆 Select a subcategory first to see smart size suggestions</p>
+              <p className="admin-hint-text">Select category and subcategory above to see smart size suggestions</p>
             )}
             {form.subcategoryId && (
               <div className="admin-chip-grid">
@@ -388,156 +536,129 @@ export default function AdminNewProductPage() {
                 ))}
               </div>
             )}
-            <div className="admin-custom-add-row">
+            <div className="admin-custom-add-row" style={{ marginTop: '14px' }}>
               <input className="admin-form-input" value={customSizeInput}
                 onChange={e => setCustomSizeInput(e.target.value)}
-                onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addCustomSize(); } }}
-                placeholder="Custom size (e.g. 44, XXXL)..." />
-              <button type="button" className="admin-btn admin-btn-outline" onClick={addCustomSize}>+ Add</button>
+                placeholder="Add custom size or model..."
+                onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addCustomSize(); } }} />
+              <button type="button" className="admin-btn admin-btn-secondary" onClick={addCustomSize}>
+                Add Size
+              </button>
             </div>
-            {sizes.length > 0 && (
-              <div className="admin-selected-chips">
-                <span className="admin-selected-label">Selected:</span>
-                {sizes.map(s => (
-                  <span key={s} className="admin-tag">
-                    {s}<button type="button" onClick={() => setSizes(prev => prev.filter(x => x !== s))}>×</button>
-                  </span>
-                ))}
-              </div>
-            )}
           </div>
         </div>
 
         {/* ── SECTION 4: Colors ── */}
         <div className="admin-form-section">
           <div className="admin-form-section-title">
-            <span className="admin-form-section-num">4</span> Colours
+            <span className="admin-form-section-num">4</span> Colors
           </div>
           <div className="admin-form-section-body">
             <div className="admin-color-swatches">
-              {COMMON_COLORS.map(c => (
-                <button key={c.name} type="button"
-                  className={`admin-color-swatch ${colors.includes(c.name) ? 'selected' : ''}`}
-                  style={{ '--swatch-color': c.hex }}
-                  onClick={() => toggleColor(c.name)}
-                  title={c.name}>
-                  {colors.includes(c.name) && <span className="admin-swatch-check">✓</span>}
-                  <span className="admin-swatch-label">{c.name}</span>
-                </button>
-              ))}
+              {COMMON_COLORS.map(c => {
+                const selected = colors.includes(c.name);
+                return (
+                  <button key={c.name} type="button"
+                    className={`admin-color-swatch ${selected ? 'selected' : ''}`}
+                    style={{ '--swatch-color': c.hex }}
+                    onClick={() => toggleColor(c.name)}>
+                    {selected && <span className="admin-swatch-check">✓</span>}
+                    <span className="admin-swatch-label">{c.name}</span>
+                  </button>
+                );
+              })}
             </div>
             <div className="admin-custom-add-row">
               <input className="admin-form-input" value={customColorInput}
                 onChange={e => setCustomColorInput(e.target.value)}
-                onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addCustomColor(); } }}
-                placeholder="Custom colour (e.g. Coral, Teal)..." />
-              <button type="button" className="admin-btn admin-btn-outline" onClick={addCustomColor}>+ Add</button>
+                placeholder="Custom color (e.g. Titanium Grey, Rose Gold)..."
+                onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addCustomColor(); } }} />
+              <button type="button" className="admin-btn admin-btn-secondary" onClick={addCustomColor}>
+                Add Color
+              </button>
             </div>
-            {colors.length > 0 && (
-              <div className="admin-selected-chips">
-                <span className="admin-selected-label">Selected:</span>
-                {colors.map(c => (
-                  <span key={c} className="admin-tag">
-                    {c}<button type="button" onClick={() => setColors(prev => prev.filter(x => x !== c))}>×</button>
-                  </span>
-                ))}
-              </div>
-            )}
           </div>
         </div>
 
         {/* ── SECTION 5: Images ── */}
         <div className="admin-form-section">
           <div className="admin-form-section-title">
-            <span className="admin-form-section-num">5</span> Images
+            <span className="admin-form-section-num">5</span> Product Images
           </div>
           <div className="admin-form-section-body">
             <div className="admin-images-grid">
-              {/* Cover Image */}
               <div className="admin-image-slot-group">
-                <div className="admin-image-slot-label">🖼️ Cover Image <span className="admin-form-label-hint">main display photo</span></div>
-                {compressing && !coverImage ? (
+                <div className="admin-image-slot-label">Cover Image (Required)</div>
+                <input ref={coverInputRef} type="file" accept="image/*" style={{ display: 'none' }} onChange={handleCoverSelected} />
+                {compressing && !coverImage && (
                   <div className="admin-image-compressing">
-                    <span className="admin-spinner" style={{ width: 24, height: 24, borderWidth: 2 }} />
-                    <p>Optimising image…</p>
+                    <span className="admin-spinner" />
+                    <p>Compressing...</p>
                   </div>
-                ) : coverImage ? (
-                  <div className="admin-image-preview-single">
-                    <img src={coverImage.preview} alt="Cover" />
-                    <button className="admin-image-remove-btn" onClick={() => setCoverImage(null)} type="button">×</button>
-                    <div className="admin-image-badge">Cover</div>
-                    {coverImage.originalSize && (
-                      <div className="admin-compress-badge">
-                        {formatBytes(coverImage.originalSize)} → {formatBytes(coverImage.compressedSize)} ✓
-                      </div>
-                    )}
-                  </div>
-                ) : (
-                  <div className="admin-image-drop-zone" onClick={() => coverInputRef.current?.click()}>
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" width="32" height="32">
+                )}
+                {!compressing && !coverImage && (
+                  <div className="admin-image-drop-zone admin-image-drop-zone-sm" onClick={() => coverInputRef.current?.click()}>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" width="28" height="28">
                       <rect x="3" y="3" width="18" height="18" rx="2" />
                       <circle cx="8.5" cy="8.5" r="1.5" />
                       <polyline points="21 15 16 10 5 21" />
                     </svg>
-                    <p>Click to upload cover</p>
-                    <small>Any size — auto-optimised to ≤ 200 KB</small>
+                    <p>Click to add cover</p>
                   </div>
                 )}
-                <input type="file" ref={coverInputRef} onChange={handleCoverSelected} accept="image/*" style={{ display: 'none' }} />
+                {coverImage && (
+                  <div className="admin-image-preview-single">
+                    <img src={coverImage.preview} alt="Cover" />
+                    <button type="button" className="admin-image-remove-btn" onClick={() => setCoverImage(null)}>✕</button>
+                    <span className="admin-image-badge">Cover</span>
+                    {coverImage.compressedSize < coverImage.originalSize && (
+                      <div className="admin-compress-badge">
+                        Saved {Math.round((1 - coverImage.compressedSize / coverImage.originalSize) * 100)}%
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
 
-              {/* Variant Images */}
               <div className="admin-image-slot-group" style={{ flex: 2 }}>
-                <div className="admin-image-slot-label">🎨 Colour Variant Images <span className="admin-form-label-hint">one per colour, tag each</span></div>
+                <div className="admin-image-slot-label">Gallery / Angle Images</div>
+                <input ref={variantInputRef} type="file" accept="image/*" multiple style={{ display: 'none' }} onChange={handleVariantsSelected} />
                 <div className="admin-variant-images-area">
-                  <div className="admin-image-drop-zone admin-image-drop-zone-sm" onClick={() => variantInputRef.current?.click()}>
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" width="24" height="24">
-                      <circle cx="12" cy="12" r="10" />
-                      <line x1="12" y1="8" x2="12" y2="16" />
-                      <line x1="8" y1="12" x2="16" y2="12" />
-                    </svg>
-                    <p>{compressing ? 'Optimising…' : 'Add variant images'}</p>
-                  </div>
-                  <input type="file" ref={variantInputRef} onChange={handleVariantsSelected} accept="image/*" multiple style={{ display: 'none' }} />
-                  {variantImages.map((img, i) => (
+                  {variantImages.map((v, i) => (
                     <div key={i} className="admin-image-preview-single">
-                      <img src={img.preview} alt={`Variant ${i + 1}`} />
-                      <button className="admin-image-remove-btn" onClick={() => setVariantImages(prev => prev.filter((_, idx) => idx !== i))} type="button">×</button>
-                      <div className="admin-image-badge">{i + 1}</div>
-                      {img.originalSize && (
-                        <div className="admin-compress-badge">
-                          {formatBytes(img.originalSize)} → {formatBytes(img.compressedSize)} ✓
-                        </div>
-                      )}
-                      {colors.length > 0 && (
-                        <select className="admin-image-color-tag"
-                          value={img.colorTag}
-                          onChange={e => setVariantImages(prev => prev.map((v, idx) => idx === i ? { ...v, colorTag: e.target.value } : v))}>
-                          <option value="">Tag colour</option>
-                          {colors.map(c => <option key={c} value={c}>{c}</option>)}
-                        </select>
-                      )}
+                      <img src={v.preview} alt={`Gallery ${i + 1}`} />
+                      <button type="button" className="admin-image-remove-btn"
+                        onClick={() => setVariantImages(prev => prev.filter((_, idx) => idx !== i))}>✕</button>
                     </div>
                   ))}
+                  <div className="admin-image-drop-zone admin-image-drop-zone-sm" onClick={() => variantInputRef.current?.click()}>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" width="24" height="24">
+                      <line x1="12" y1="5" x2="12" y2="19" />
+                      <line x1="5" y1="12" x2="19" y2="12" />
+                    </svg>
+                    <p>Add Gallery Photos</p>
+                  </div>
                 </div>
               </div>
             </div>
           </div>
         </div>
 
-        {/* ── Submit ── */}
-        <button type="submit" className="admin-btn admin-btn-primary admin-btn-submit"
-          disabled={loading || compressing} id="save-product-btn">
+        {uploadProgress && (
+          <div style={{ padding: '12px 16px', background: 'var(--admin-surface)', border: '1px solid var(--admin-accent)', borderRadius: '8px', color: 'var(--admin-accent-hover)', marginBottom: '16px', fontSize: '13px', fontWeight: 600 }}>
+            <span className="admin-spinner" style={{ marginRight: '8px', verticalAlign: 'middle' }} />
+            {uploadProgress}
+          </div>
+        )}
+
+        <button type="submit" className="admin-btn admin-btn-primary admin-btn-submit" disabled={loading}>
           {loading ? (
-            <><span className="admin-spinner" style={{ width: 18, height: 18, borderWidth: 2 }} /> {uploadProgress || 'Creating Product...'}</>
-          ) : compressing ? (
-            <><span className="admin-spinner" style={{ width: 18, height: 18, borderWidth: 2 }} /> Optimising Images...</>
+            <><span className="admin-spinner" style={{ width: 18, height: 18 }} /> Saving Product...</>
           ) : (
-            <>✦ Create Product</>
+            'Publish Product'
           )}
         </button>
-
       </form>
-    </>
+    </div>
   );
 }

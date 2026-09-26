@@ -2,12 +2,7 @@
  * /api/edit-product
  * ─────────────────────────────────────────────────────────────────────────────
  * Updates an existing product's metadata and handles image deletions.
- *
- * UPDATED: No longer handles image file uploads — new images are uploaded
- * directly from the browser to Cloudinary and saved via /api/save-image.
- * This route still handles deleting removed images from Cloudinary/Supabase.
- *
- * Body: JSON with product fields + removedImageIds
+ * Supports dynamic gadget ordering limits (minOrderQuantity, maxOrderQuantity, stockQuantity).
  */
 
 import { NextResponse } from 'next/server';
@@ -32,7 +27,7 @@ export async function PUT(request) {
 
     const productId     = body.productId;
     const name          = body.name;
-    const brand         = body.brand || 'Brand 2 Brand';
+    const brand         = body.brand || 'Skplore';
     const subcategoryId = body.subcategoryId;
     const gender        = body.gender || null;
     const price         = parseInt(body.price);
@@ -44,23 +39,63 @@ export async function PUT(request) {
     const atmosphereTheme = body.atmosphereTheme || 'default';
     const removedImageIds = body.removedImageIds || [];
 
+    // ── Gadget quantity & stock limits ──────────────────────
+    const minOrderQuantity = body.minOrderQuantity ? Math.max(1, parseInt(body.minOrderQuantity, 10)) : 1;
+    const maxOrderQuantity = body.maxOrderQuantity ? parseInt(body.maxOrderQuantity, 10) : null;
+    const stockQuantity    = (body.stockQuantity !== null && body.stockQuantity !== undefined && body.stockQuantity !== '')
+      ? parseInt(body.stockQuantity, 10)
+      : null;
+
     if (!productId || !name || !price || !subcategoryId) {
       return NextResponse.json({ error: 'Missing required fields' }, { status: 400 });
     }
 
     // ── Update product row ──────────────────────────────────
-    const { error: updateErr } = await supabase
+    const updatePayload = {
+      name, brand, subcategory_id: subcategoryId, gender, price,
+      original_price: originalPrice, description, sizes, colors,
+      badge, atmosphere_theme: atmosphereTheme,
+      min_order_quantity: minOrderQuantity,
+      max_order_quantity: maxOrderQuantity,
+      stock_quantity: stockQuantity,
+    };
+
+    let { error: updateErr } = await supabase
       .from('products')
-      .update({
-        name, brand, subcategory_id: subcategoryId, gender, price,
-        original_price: originalPrice, description, sizes, colors,
-        badge, atmosphere_theme: atmosphereTheme,
-      })
+      .update(updatePayload)
       .eq('id', productId);
+
+    // Fallback if columns not yet added to Postgres table
+    if (updateErr && (updateErr.code === '42703' || updateErr.message?.includes('column'))) {
+      delete updatePayload.min_order_quantity;
+      delete updatePayload.max_order_quantity;
+      delete updatePayload.stock_quantity;
+      const retry = await supabase
+        .from('products')
+        .update(updatePayload)
+        .eq('id', productId);
+      updateErr = retry.error;
+    }
 
     if (updateErr) return NextResponse.json({ error: updateErr.message }, { status: 500 });
 
-    console.log(`✅ Product updated: ${productId} — "${name}"`);
+    // ── Dual-layer persistence: update store-config/gadget_quantities.json ──
+    try {
+      const { data: qData } = await supabase.storage.from('store-config').download('gadget_quantities.json');
+      let qMap = {};
+      if (qData) {
+        try { qMap = JSON.parse(await qData.text()); } catch (e) {}
+      }
+      qMap[productId] = { minOrderQuantity, maxOrderQuantity, stockQuantity };
+      await supabase.storage.from('store-config').upload('gadget_quantities.json', JSON.stringify(qMap, null, 2), {
+        upsert: true,
+        contentType: 'application/json',
+      });
+    } catch (err) {
+      console.warn('Could not update gadget_quantities.json storage:', err.message);
+    }
+
+    console.log(`✅ Product updated: ${productId} — "${name}" (Min: ${minOrderQuantity}, Max: ${maxOrderQuantity || '∞'}, Stock: ${stockQuantity || '—'})`);
 
     const imageResults = { deleted: 0 };
 
@@ -75,11 +110,9 @@ export async function PUT(request) {
       if (img?.image_url) {
         try {
           if (isCloudinaryUrl(img.image_url)) {
-            // Delete from Cloudinary
             const publicId = extractPublicId(img.image_url);
             if (publicId) await deleteFromCloudinary(publicId);
           } else if (isSupabaseStorageUrl(img.image_url)) {
-            // Legacy: delete from Supabase Storage
             const storagePath = extractSupabaseStoragePath(img.image_url);
             if (storagePath) await supabase.storage.from('product-images').remove([storagePath]);
           }
@@ -89,10 +122,7 @@ export async function PUT(request) {
       }
       await supabase.from('product_images').delete().eq('id', imgId);
       imageResults.deleted++;
-      console.log(`   🗑️  Deleted image ${imgId}`);
     }
-
-    console.log(`📊 Edit summary: ${imageResults.deleted} deleted`);
 
     return NextResponse.json({ success: true, images: imageResults });
   } catch (err) {

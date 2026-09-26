@@ -4,7 +4,7 @@ import { redirect } from 'next/navigation';
 import './admin.css';
 
 export const metadata = {
-  title: 'Admin Dashboard | Brand 2 Brand',
+  title: 'Admin Dashboard | Skplore',
   description: 'Manage products, categories, and store content.',
 };
 

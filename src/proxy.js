@@ -20,7 +20,7 @@ import { NextResponse } from 'next/server';
  */
 
 // Routes that are ALWAYS public — no session required
-const PUBLIC_PATHS = ['/login'];
+const PUBLIC_PATHS = ['/login', '/api/gadget-limits'];
 
 // Prefixes we never intercept (Next.js internals + static assets)
 const BYPASS_PREFIXES = [

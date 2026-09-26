@@ -79,7 +79,7 @@ export default function AdminLoginPage() {
             B2B
           </div>
         </div>
-        <h1>Admin Login</h1>
+        <h1>Skplore Admin</h1>
         <p>Sign in to manage your store</p>
 
         {error && <div className="admin-login-error">{error}</div>}
@@ -92,7 +92,7 @@ export default function AdminLoginPage() {
               className="admin-form-input"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
-              placeholder="admin@brand2brand.com"
+              placeholder="admin@skplore.com"
               required
               autoComplete="username"
               id="admin-login-email"

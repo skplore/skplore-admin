@@ -55,6 +55,7 @@ function ProductsPageInner() {
   const categoryNameFilter = searchParams.get('categoryName') || '';
 
   const [products, setProducts] = useState([]);
+  const [gadgetQuantities, setGadgetQuantities] = useState({});
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [toggling, setToggling] = useState(null);
@@ -63,14 +64,38 @@ function ProductsPageInner() {
 
   const fetchProducts = useCallback(async () => {
     try {
-      const res = await fetch('/api/products');
+      const res = await fetch(`/api/products?_t=${Date.now()}`, { cache: 'no-store' });
+      let prods = [];
+      let gMap = {};
+
       if (res.ok) {
         const json = await res.json();
-        setProducts(json.products || []);
-      } else {
-        console.error('Failed to fetch products');
-        setProducts([]);
+        prods = json.products || [];
+        gMap = json.gadgetQuantities || {};
       }
+
+      // Guarantee freshest limits directly from public storage CDN
+      try {
+        const sUrl = `https://skimedlufkytgemmdhsv.supabase.co/storage/v1/object/public/store-config/gadget_quantities.json?t=${Date.now()}`;
+        const sRes = await fetch(sUrl, { cache: 'no-store' });
+        if (sRes.ok) {
+          const freshMap = await sRes.json();
+          gMap = { ...gMap, ...freshMap };
+        }
+      } catch (e) {}
+
+      const enriched = prods.map(p => {
+        const limit = gMap[p.id] || gMap[p.id?.toLowerCase()] || {};
+        return {
+          ...p,
+          min_order_quantity: limit.minOrderQuantity !== undefined ? limit.minOrderQuantity : (p.min_order_quantity || 1),
+          max_order_quantity: limit.maxOrderQuantity !== undefined ? limit.maxOrderQuantity : (p.max_order_quantity || null),
+          stock_quantity: limit.stockQuantity !== undefined ? limit.stockQuantity : (p.stock_quantity || null),
+        };
+      });
+
+      setProducts(enriched);
+      setGadgetQuantities(gMap);
     } catch (err) {
       console.error('Error fetching products:', err);
       setProducts([]);
@@ -209,7 +234,7 @@ function ProductsPageInner() {
             <thead>
               <tr>
                 <th>Image</th><th>Name</th><th>Code</th><th>Category</th>
-                <th>Price</th><th>Badge</th>
+                <th>Price</th><th>Badge</th><th>Order Limits</th>
                 <th title="Toggle to show/hide on website. Data always stays in database.">Visibility</th>
                 <th style={{ textAlign: 'right' }}>Actions</th>
               </tr>
@@ -275,7 +300,7 @@ function ProductsPageInner() {
               })}
               {filtered.length === 0 && (
                 <tr>
-                  <td colSpan={7} style={{ textAlign: 'center', padding: '40px', color: 'var(--admin-text-muted)' }}>
+                  <td colSpan={9} style={{ textAlign: 'center', padding: '40px', color: 'var(--admin-text-muted)' }}>
                     {search ? 'No products match your search.' : categoryNameFilter ? `No products in ${categoryNameFilter}.` : 'No products yet.'}
                   </td>
                 </tr>

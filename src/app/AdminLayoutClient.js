@@ -83,6 +83,16 @@ export default function AdminLayoutClient({ user, children }) {
         </svg>
       ),
     },
+    {
+      href: '/discounts',
+      label: 'Discounts',
+      icon: (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+          <path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z" />
+          <line x1="7" y1="7" x2="7.01" y2="7" />
+        </svg>
+      ),
+    },
   ];
 
   const isActive = (href) => {
@@ -110,9 +120,9 @@ export default function AdminLayoutClient({ user, children }) {
         </button>
 
         <div className="admin-sidebar-brand">
-          <div className="admin-sidebar-brand-icon">B2B</div>
+          <div className="admin-sidebar-brand-icon">SKP</div>
           <div>
-            <span>Brand 2 Brand</span>
+            <span>Skplore</span>
             <small>Admin Panel</small>
           </div>
         </div>
@@ -173,6 +183,7 @@ export default function AdminLayoutClient({ user, children }) {
             {pathname === '/' && 'Dashboard'}
             {pathname.startsWith('/categories') && 'Categories'}
             {pathname.startsWith('/products') && 'Products'}
+            {pathname.startsWith('/discounts') && 'Discounts'}
           </div>
           <div className="admin-topbar-actions">
             <div className="admin-topbar-user">
